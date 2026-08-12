@@ -5,7 +5,7 @@
    오디오 처리는 전부 기기 안에서 도니 네트워크는 앱 파일을 받을 때만 쓴다.
    따라서 캐시가 있으면 즉시 내주고, 새 버전은 조용히 받아 다음 실행에 반영한다. */
 
-const VERSION = 'v1.0.0';
+const VERSION = 'v1.0.1';
 const CACHE = 'masterdesk-' + VERSION;
 
 // 상대 경로로 적어야 /Mastering/ 같은 하위 경로에 배포해도 그대로 동작한다.

@@ -217,7 +217,7 @@ footer{color:#5D6874;font-size:11px;text-align:center;padding:6px 0 18px;line-he
   <div class="wrap">
     <div class="brand">
       <h1>MASTER <span>DESK</span></h1>
-      <em>v1.0 · iOS</em>
+      <em>v1.0.1 · iOS</em>
     </div>
     <p class="tag">브라우저 안에서 끝내는 마스터링. 업로드 없음, 서버 없음.</p>
   </div>
@@ -331,7 +331,7 @@ footer{color:#5D6874;font-size:11px;text-align:center;padding:6px 0 18px;line-he
   </div><!-- /gate -->
 
   <footer>측정: ITU-R BS.1770-4 · 처리 전량 기기 내부 연산<br>
-    <span id="swState">v1.0.0</span></footer>
+    <span id="swState">v1.0.1</span></footer>
 </div>
 
 <!-- 트랜스포트 -->
@@ -408,7 +408,7 @@ const PRESETS = {
 };
 const TARGET_LUFS = -14, SCALE_MIN = -30, SCALE_MAX = -6;
 
-let ctx=null, srcBuffer=null, live=null, srcNode=null;
+let ctx=null, ctxReady=null, srcBuffer=null, live=null, srcNode=null;
 let playing=false, startedAt=0, offset=0, looping=false, bypass=false;
 let bitDepth=24, sourceLufs=null, renderedBlobUrl=null, renderedFile=null, CAL=null;
 
@@ -797,31 +797,69 @@ async function measureChainLatency(sr, cal){
   }catch(e){ console.warn('체인 지연 측정 실패', e); return cal.preDelay*2; }
 }
 
+const SILENT_WAV = "data:audio/wav;base64,UklGRmQGAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YUAGAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+let audioPrimed = false;
+
+/** iOS는 Web Audio를 벨소리 스위치에 묶는다.
+    무음 오디오 엘리먼트를 재생해 미디어 세션으로 전환시킨다. */
+function unlockIOSAudio(){
+  const el=$('unmute');
+  if(!el.src) el.src = SILENT_WAV;
+  el.volume=0.001;
+  const p=el.play();
+  if(p && p.catch) p.catch(()=>{});
+}
+
+/** 첫 탭에서 오디오를 미리 깨워 둔다.
+    파일 선택창이 열려 있는 동안 사용자 제스처가 만료되므로 그 전에 확보해야 한다. */
+function primeAudio(){
+  if(audioPrimed) return;
+  audioPrimed = true;
+  unlockIOSAudio();
+  ensureCtx().catch(e=>console.warn('사전 초기화 실패', e));
+}
+['pointerdown','touchend','click'].forEach(ev=>
+  document.addEventListener(ev, primeAudio, {passive:true}));
+
 async function ensureCtx(){
-  if(ctx) { if(ctx.state==='suspended') await ctx.resume(); return ctx; }
-  const AC = window.AudioContext || window.webkitAudioContext;
-  ctx = new AC({latencyHint:'playback'});
-  await ctx.resume();
-  CAL = await calibrate(ctx.sampleRate);
+  if(ctxReady) return ctxReady;                 // 동시 호출이 두 번 초기화하지 않도록
+  ctxReady = (async ()=>{
+    const AC = window.AudioContext || window.webkitAudioContext;
+    ctx = new AC({latencyHint:'playback'});
 
-  const chain = buildChain(ctx, CAL);
-  const dry = ctx.createGain(), wet = ctx.createGain(), master = ctx.createGain();
-  dry.gain.value = 0; wet.gain.value = 1;
+    /* ⚠️ ctx.resume()을 await하면 절대 안 된다.
+       홈 화면에 추가한 PWA(standalone)에서는 사용자 제스처가 만료된 상태로
+       resume()을 부르면 프로미스가 resolve도 reject도 되지 않고 영원히 매달린다.
+       타임아웃으로도 못 잡는 진짜 교착이라 "엔진 초기화 중…"에서 앱이 멈춘다.
+       디코딩과 오프라인 렌더는 suspended 상태에서도 정상 동작하므로
+       여기서 기다릴 이유가 없다. 실제 재개는 재생 버튼(직접 제스처)에서 한다. */
+    ctx.resume().catch(()=>{});
 
-  // A/B 비교 시 시간축이 어긋나지 않도록 원본에도 동일 지연을 건다.
-  const dryDelay = ctx.createDelay(0.2);
-  dryDelay.delayTime.value = CAL.latency;
+    diag('엔진 캘리브레이션 중…');
+    CAL = await calibrate(ctx.sampleRate);
 
-  const inHub = ctx.createGain();
-  inHub.connect(chain.input);
-  inHub.connect(dryDelay); dryDelay.connect(dry);
-  chain.output.connect(wet);
-  dry.connect(master); wet.connect(master);
-  master.connect(ctx.destination);
+    diag('신호 체인 구성 중…');
+    const chain = buildChain(ctx, CAL);
+    const dry = ctx.createGain(), wet = ctx.createGain(), master = ctx.createGain();
+    dry.gain.value = 0; wet.gain.value = 1;
 
-  live = {chain, dry, wet, master, inHub, meter:makeMeter(ctx, master)};
-  applyParams(chain.nodes, P, ctx, false);
-  return ctx;
+    // A/B 비교 시 시간축이 어긋나지 않도록 원본에도 동일 지연을 건다.
+    const dryDelay = ctx.createDelay(0.2);
+    dryDelay.delayTime.value = CAL.latency;
+
+    const inHub = ctx.createGain();
+    inHub.connect(chain.input);
+    inHub.connect(dryDelay); dryDelay.connect(dry);
+    chain.output.connect(wet);
+    dry.connect(master); wet.connect(master);
+    master.connect(ctx.destination);
+
+    live = {chain, dry, wet, master, inHub, meter:makeMeter(ctx, master)};
+    applyParams(chain.nodes, P, ctx, false);
+    diag('');
+    return ctx;
+  })();
+  return ctxReady;
 }
 
 /** 채널별 K-weighting → AnalyserNode. (다운믹스하면 LUFS가 3dB 틀어짐) */
@@ -940,7 +978,7 @@ async function loadFile(file){
   try{
     stop();
     toast('<span class="busy"></span>오디오 엔진 준비 중…', 60000);
-    diag('엔진 초기화 중…');
+    diag('엔진 준비 중…');
     await ensureCtx();
 
     toast('<span class="busy"></span>파일 읽는 중…', 60000);
@@ -994,20 +1032,16 @@ const fmt = s => `${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')
    6. 재생 / 트랜스포트
    ══════════════════════════════════════════════════════════ */
 
-/** iOS는 Web Audio를 벨소리 스위치에 묶는다.
-    무음 오디오 엘리먼트를 재생해 미디어 세션으로 전환시킨다. */
-function unlockIOSAudio(){
-  const el=$('unmute');
-  if(el.src) return;
-  el.src='data:audio/wav;base64,UklGRmQGAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YUAGAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
-  el.volume=0.001;
-  el.play().catch(()=>{});
-}
 
 async function play(){
   if(!srcBuffer) return;
-  await ensureCtx();
   unlockIOSAudio();
+  await ensureCtx();
+  // 여기는 재생 버튼을 직접 누른 순간이라 제스처가 살아 있다 → 안전하게 재개 가능
+  if(ctx.state !== 'running'){
+    try{ await withTimeout(ctx.resume(), 3000, '오디오 재개'); }
+    catch(e){ diag('소리가 안 나면 화면을 한 번 탭한 뒤 다시 재생을 눌러 주세요.'); }
+  }
   stopNode();
   srcNode = ctx.createBufferSource();
   srcNode.buffer = srcBuffer;
@@ -1298,7 +1332,7 @@ if('serviceWorker' in navigator){
   window.addEventListener('load', ()=>{
     navigator.serviceWorker.register('./sw.js').then(reg=>{
       const badge=$('swState');
-      const mark=()=>{ if(badge){ badge.textContent='v1.0.0 · 오프라인 사용 가능'; badge.classList.add('ready'); } };
+      const mark=()=>{ if(badge){ badge.textContent='v1.0.1 · 오프라인 사용 가능'; badge.classList.add('ready'); } };
       if(navigator.serviceWorker.controller) mark();
       reg.addEventListener('updatefound', ()=>{
         const w=reg.installing;
@@ -1307,7 +1341,7 @@ if('serviceWorker' in navigator){
     }).catch(err=>{
       console.warn('SW 등록 실패', err);
       const badge=$('swState');
-      if(badge) badge.textContent='v1.0.0 · 온라인 전용 (오프라인 캐시 미적용)';
+      if(badge) badge.textContent='v1.0.1 · 온라인 전용 (오프라인 캐시 미적용)';
     });
   });
 }
