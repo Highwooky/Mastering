@@ -1,0 +1,16 @@
+{
+  "name": "MASTER DESK — 브라우저 마스터링",
+  "short_name": "MASTER DESK",
+  "description": "아이폰 브라우저 안에서 끝내는 오디오 마스터링. 업로드 없음, 서버 없음.",
+  "lang": "ko",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0D1014",
+  "theme_color": "#0D1014",
+  "icons": [
+    { "src": "./icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "./icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
